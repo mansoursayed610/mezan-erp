@@ -5932,6 +5932,13 @@ function openCommissionReceiptModal(empId) {
           📋 ${t('rcp_select_commissions')} (${t('rcp_commission_unpaid')}):
         </h4>
 
+        <!-- Manual Commission Entry -->
+        <div style="margin-bottom:16px; padding:14px; background:var(--bg-card); border:1px solid var(--gold-dark); border-radius:10px;">
+          <h4 style="color:var(--gold); margin:0 0 12px; font-size:14px;">➕ إضافة عمولة يدوياً / Add Commission Manually</h4>
+          <div id="manualCommList"></div>
+          <button type="button" class="btn" onclick="addManualCommRow()" style="margin-top:8px; width:100%; border:1px dashed var(--gold); color:var(--gold);">+ إضافة عمولة</button>
+        </div>
+
         ${unpaidSales.length === 0 ? `
           <div class="empty-state" style="padding:20px;">
             <div class="empty-text">${t('rcp_no_unpaid')}</div>
@@ -5983,9 +5990,67 @@ function toggleAllCommissions(checked) {
 
 function updateCommissionTotal() {
   const selected = [...document.querySelectorAll('.comm-cb:checked')];
-  const total = selected.reduce((s, cb) => s + Number(cb.dataset.amount || 0), 0);
+  const fromSales = selected.reduce((s, cb) => s + Number(cb.dataset.amount || 0), 0);
+  const manualItems = getManualCommissions ? getManualCommissions() : [];
+  const fromManual = manualItems.reduce((s, item) => s + item.amount, 0);
+  const total = fromSales + fromManual;
   const el = document.getElementById('commSelectedTotal');
   if (el) el.textContent = fmtMoney(total);
+}
+
+// Manual commission row counter
+let _manualCommCounter = 0;
+
+function addManualCommRow() {
+  _manualCommCounter++;
+  const employees = DB.getEmployees();
+  const brokerOptions = employees.filter(e => e.role === 'broker' || e.role === 'sales')
+    .map(e => '<option value="' + escapeHtml(e.name) + '">' + escapeHtml(e.name) + '</option>').join('');
+  
+  const row = document.createElement('div');
+  row.className = 'manual-comm-row';
+  row.id = 'manualComm_' + _manualCommCounter;
+  row.style.cssText = 'padding:12px; margin-bottom:8px; background:var(--bg-elevated); border:1px solid var(--border); border-radius:8px; position:relative;';
+  row.innerHTML = `
+    <button type="button" onclick="this.parentElement.remove(); updateCommissionTotal();" style="position:absolute; top:6px; left:6px; background:var(--red); color:white; border:none; border-radius:50%; width:24px; height:24px; cursor:pointer; font-size:14px;">×</button>
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+      <div class="input-group"><label style="font-size:11px;">المشروع / Project</label><input class="mc-project" placeholder="DAMAC LAGOONS"></div>
+      <div class="input-group"><label style="font-size:11px;">الوحدة / Unit</label><input class="mc-unit" placeholder="Building 5 - Unit 302"></div>
+      <div class="input-group"><label style="font-size:11px;">النوع / Type</label>
+        <select class="mc-type"><option value="1st">1st Claim</option><option value="2nd">2nd Claim</option><option value="Full">Full</option><option value="Bonus">Bonus</option></select>
+      </div>
+      <div class="input-group"><label style="font-size:11px;">العميل / Client</label><input class="mc-client" placeholder="Client name"></div>
+      <div class="input-group"><label style="font-size:11px;">المبلغ / Amount (AED)</label><input type="number" step="0.01" class="mc-amount" placeholder="5000" onchange="updateCommissionTotal()"></div>
+      <div class="input-group"><label style="font-size:11px;">شير مع / Shared with</label>
+        <select class="mc-shared"><option value="">— لا يوجد شير —</option>${brokerOptions}</select>
+      </div>
+      <div class="input-group"><label style="font-size:11px;">نسبة الشير % (اختياري)</label><input type="number" class="mc-share-pct" placeholder="50" min="0" max="100"></div>
+      <div class="input-group"><label style="font-size:11px;">التاريخ / Date</label><input type="date" class="mc-date" value="${new Date().toISOString().split('T')[0]}"></div>
+    </div>
+  `;
+  document.getElementById('manualCommList').appendChild(row);
+}
+
+function getManualCommissions() {
+  const rows = document.querySelectorAll('.manual-comm-row');
+  const items = [];
+  rows.forEach(row => {
+    const amount = Number(row.querySelector('.mc-amount')?.value || 0);
+    if (amount > 0) {
+      items.push({
+        project: row.querySelector('.mc-project')?.value || '-',
+        unit: row.querySelector('.mc-unit')?.value || '-',
+        claimType: row.querySelector('.mc-type')?.value || '1st',
+        client: row.querySelector('.mc-client')?.value || '-',
+        amount: amount,
+        sharedWith: row.querySelector('.mc-shared')?.value || '',
+        sharePct: Number(row.querySelector('.mc-share-pct')?.value || 0),
+        date: fmtDate(row.querySelector('.mc-date')?.value || ''),
+        isManual: true
+      });
+    }
+  });
+  return items;
 }
 
 function generateCommissionReceipt(empId) {
@@ -5997,10 +6062,14 @@ function generateCommissionReceipt(empId) {
   if (!period) { toast('حدد الفترة', 'error'); return; }
 
   const selectedCheckboxes = [...document.querySelectorAll('.comm-cb:checked')];
-  if (selectedCheckboxes.length === 0) { toast('اختر عمولة واحدة على الأقل', 'error'); return; }
+  const manualItems = getManualCommissions();
+  
+  if (selectedCheckboxes.length === 0 && manualItems.length === 0) { toast('اختر عمولة أو أضف واحدة يدوياً', 'error'); return; }
 
   const selectedSaleIds = selectedCheckboxes.map(cb => cb.value);
-  const totalCommission = selectedCheckboxes.reduce((s, cb) => s + Number(cb.dataset.amount || 0), 0);
+  const fromSalesTotal = selectedCheckboxes.reduce((s, cb) => s + Number(cb.dataset.amount || 0), 0);
+  const fromManualTotal = manualItems.reduce((s, item) => s + item.amount, 0);
+  const totalCommission = fromSalesTotal + fromManualTotal;
 
   const payroll = DB.getPayroll().filter(p => p.employeeId === empId);
   const periodEntries = payroll.filter(p => (p.month || '').includes(period));
@@ -6030,6 +6099,11 @@ function generateCommissionReceipt(empId) {
         sharePct: sharePct
       });
     }
+  });
+
+  // Add manual commission items
+  manualItems.forEach(mi => {
+    commItems.push(mi);
   });
 
   document.querySelector('.modal-overlay')?.remove();
