@@ -5542,6 +5542,7 @@ function renderPayroll() {
           ${employees.map(e => `<option value="${e.id}" ${e.id === selectedEmp.id ? 'selected' : ''}>${escapeHtml(e.code)} — ${escapeHtml(e.name)}</option>`).join('')}
         </select>
         <button class="btn btn-primary" onclick="openPayrollModal('${selectedEmp.id}')">${t('pay_new_transaction')}</button>
+        <button class="btn" onclick="openCommissionDashboard('${selectedEmp.id}')" style="background:rgba(201,169,97,0.15); color:var(--gold); border:1px solid var(--gold);">📊 عمولات البروكر</button>
         <button class="btn" onclick="generateReceipt('${selectedEmp.id}')">${t('pay_receipt')}</button>
       </div>
     </div>
@@ -5990,6 +5991,7 @@ function updateCommissionTotal() {
 function generateCommissionReceipt(empId) {
   const emp = DB.getEmployees().find(e => e.id === empId);
   if (!emp) return;
+  const settings = DB.getSettings();
   const period = document.getElementById('commPeriod').value;
   const deductHere = document.getElementById('commDeductHere').checked;
   if (!period) { toast('حدد الفترة', 'error'); return; }
@@ -6004,40 +6006,166 @@ function generateCommissionReceipt(empId) {
   const periodEntries = payroll.filter(p => (p.month || '').includes(period));
   const totalAdvances = deductHere ? periodEntries.filter(p => p.type === 'advance').reduce((s,p) => s + Number(p.amount||0), 0) : 0;
   const totalDeductions = deductHere ? periodEntries.filter(p => p.type === 'deduction').reduce((s,p) => s + Number(p.amount||0), 0) : 0;
+  const net = totalCommission - totalAdvances - totalDeductions;
 
-  // Build details: each commission as a line
-  const details = [];
+  // Build detailed commission items with project/unit info
+  const commItems = [];
   selectedCheckboxes.forEach(cb => {
     const sale = DB.getSales().find(s => s.id === cb.value);
     if (sale) {
-      details.push(`عمولة: ${sale.clientName || '-'} / ${sale.project || '-'} (${fmtDate(sale.date)}) — ${fmtMoney(sale.brokerCommissionDue)}`);
+      const brokerAmt = Number(sale.brokerCommissionDue || 0);
+      // Check if shared with another broker
+      const allBrokers = DB.getEmployees().filter(e => e.role === 'broker' || e.role === 'sales');
+      const sharedWith = (sale.sharedBroker && sale.sharedBroker !== emp.name) ? sale.sharedBroker :
+                         (sale.salesName && sale.salesName !== emp.name && sale.brokerName === emp.name) ? sale.salesName : '';
+      const sharePct = sale.sharePct ? Number(sale.sharePct) : 0;
+      commItems.push({
+        project: sale.project || '-',
+        unit: sale.unitNumber || sale.building || '-',
+        claimType: sale.claimType || '1st',
+        date: fmtDate(sale.date),
+        client: sale.clientName || '-',
+        amount: brokerAmt,
+        sharedWith: sharedWith,
+        sharePct: sharePct
+      });
     }
   });
-  if (deductHere) {
-    periodEntries.filter(p => p.reason && (p.type === 'advance' || p.type === 'deduction')).forEach(p => {
-      details.push(`${p.type === 'advance' ? t('pay_advance') : t('pay_deduction')}: ${p.reason} — ${fmtMoney(p.amount)}`);
-    });
-  }
 
   document.querySelector('.modal-overlay')?.remove();
 
-  // Generate receipt
-  printReceiptHTML(emp, period, {
-    receiptType: t('rcp_commission'),
-    salary: 0,
-    commission: totalCommission,
-    advances: totalAdvances,
-    deductions: totalDeductions,
-    details
-  });
+  // ====== Professional Commission Receipt ======
+  const logoSrc = (typeof LOGO_URL !== 'undefined' && LOGO_URL) ? LOGO_URL : '';
+  const today = new Date();
+  const receiptNum = 'CR-' + today.getFullYear() + '-' + String(today.getMonth()+1).padStart(2,'0') + '-' + String(Math.floor(Math.random()*9000)+1000);
 
-  // Record receipt & mark sales as paid (so they don't show next time)
+  const modal = document.createElement('div');
+  modal.className = 'modal-overlay';
+  modal.innerHTML = `
+    <div class="modal" style="max-width:800px;">
+      <div class="modal-header no-print">
+        <h3 class="modal-title">💎 ${t('rcp_commission')} — ${escapeHtml(emp.name)}</h3>
+        <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
+      </div>
+      <div class="modal-body" style="padding:0;">
+        <div id="commReceiptPrintArea" style="background:white; color:#000; padding:30px; font-family:'Tajawal','Arial',sans-serif; line-height:1.5;">
+
+          <!-- Header -->
+          <table style="width:100%; border-collapse:collapse; margin-bottom:16px;">
+            <tr>
+              <td style="border-bottom:4px solid #c9a961; padding:14px 0; vertical-align:middle;">
+                ${logoSrc ? '<img src="' + logoSrc + '" style="width:60px; height:60px; object-fit:contain; margin-bottom:6px; display:block;">' : ''}
+                <h2 style="color:#c9a961; font-family:'Cinzel',serif; letter-spacing:3px; margin:0; font-size:20px;">${escapeHtml(settings.companyName)}</h2>
+                <p style="color:#555; margin:4px 0 0; font-size:11px;">TRN: ${escapeHtml(settings.trn || '')}</p>
+              </td>
+              <td style="border-bottom:4px solid #c9a961; padding:14px 0; text-align:left; vertical-align:middle;">
+                <h2 style="color:#000; font-family:'Cinzel',serif; font-size:20px; letter-spacing:2px; margin:0;">COMMISSION RECEIPT</h2>
+                <p style="color:#c9a961; font-family:'Cinzel',serif; font-size:13px; margin:4px 0 0;">ريسيت عمولات</p>
+                <p style="color:#555; font-size:11px; margin:6px 0 0;"><b>Receipt #:</b> ${receiptNum}</p>
+                <p style="color:#555; font-size:11px;"><b>Date:</b> ${fmtDate(today.toISOString())}</p>
+                <p style="color:#555; font-size:11px;"><b>Period:</b> ${escapeHtml(period)}</p>
+              </td>
+            </tr>
+          </table>
+
+          <!-- Employee Info -->
+          <div style="background:#fdf8ec; border:1px solid #c9a961; padding:12px 16px; border-radius:6px; margin-bottom:16px;">
+            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+              <tr>
+                <td style="padding:4px 8px;"><b>Name / الاسم:</b> ${escapeHtml(emp.name)}</td>
+                <td style="padding:4px 8px;"><b>Code:</b> ${escapeHtml(emp.code || '-')}</td>
+              </tr>
+              <tr>
+                <td style="padding:4px 8px;"><b>Role / الوظيفة:</b> ${escapeHtml(emp.role || 'Broker')}</td>
+                <td style="padding:4px 8px;"><b>Email:</b> ${escapeHtml(emp.email || '-')}</td>
+              </tr>
+            </table>
+          </div>
+
+          <!-- Commission Items Table -->
+          <h3 style="color:#000; font-family:'Cinzel',serif; letter-spacing:2px; border-bottom:2px solid #c9a961; padding-bottom:6px; margin:16px 0 10px; font-size:14px;">📋 COMMISSION DETAILS / تفاصيل العمولات</h3>
+          <table style="width:100%; border-collapse:collapse; font-size:12px; border:2px solid #333;">
+            <thead>
+              <tr style="background:#c9a961; color:#000;">
+                <th style="padding:8px 6px; border:1px solid #333; text-align:center; font-weight:700;">#</th>
+                <th style="padding:8px 6px; border:1px solid #333; text-align:start; font-weight:700;">Project / المشروع</th>
+                <th style="padding:8px 6px; border:1px solid #333; text-align:start; font-weight:700;">Unit / الوحدة</th>
+                <th style="padding:8px 6px; border:1px solid #333; text-align:center; font-weight:700;">Type</th>
+                <th style="padding:8px 6px; border:1px solid #333; text-align:start; font-weight:700;">Client / العميل</th>
+                <th style="padding:8px 6px; border:1px solid #333; text-align:start; font-weight:700;">Date</th>
+                <th style="padding:8px 6px; border:1px solid #333; text-align:start; font-weight:700;">Shared With</th>
+                <th style="padding:8px 6px; border:1px solid #333; text-align:end; font-weight:700;">Amount (AED)</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${commItems.map((c, i) => '<tr style="background:' + (i % 2 === 0 ? '#fff' : '#f9f9f9') + ';">' +
+                '<td style="padding:8px 6px; border:1px solid #999; text-align:center;">' + (i+1) + '</td>' +
+                '<td style="padding:8px 6px; border:1px solid #999; font-weight:600;">' + escapeHtml(c.project) + '</td>' +
+                '<td style="padding:8px 6px; border:1px solid #999;">' + escapeHtml(c.unit) + '</td>' +
+                '<td style="padding:8px 6px; border:1px solid #999; text-align:center;"><span style="background:#e8f5e9; color:#2e7d32; padding:2px 8px; border-radius:10px; font-size:11px;">' + escapeHtml(c.claimType) + '</span></td>' +
+                '<td style="padding:8px 6px; border:1px solid #999;">' + escapeHtml(c.client) + '</td>' +
+                '<td style="padding:8px 6px; border:1px solid #999;">' + escapeHtml(c.date) + '</td>' +
+                '<td style="padding:8px 6px; border:1px solid #999;">' + (c.sharedWith ? escapeHtml(c.sharedWith) + (c.sharePct ? ' (' + c.sharePct + '%)' : '') : '—') + '</td>' +
+                '<td style="padding:8px 6px; border:1px solid #999; text-align:end; font-weight:700; color:#2e7d32;">' + fmtMoney(c.amount) + '</td>' +
+              '</tr>').join('')}
+            </tbody>
+          </table>
+
+          <!-- Summary -->
+          <table style="width:50%; margin-inline-start:auto; border-collapse:collapse; margin-top:16px; font-size:13px;">
+            <tr style="border-bottom:1px solid #ddd;"><td style="padding:8px;">إجمالي العمولات / Total Commissions</td><td style="padding:8px; text-align:end; font-weight:700; color:#2e7d32;">+ ${fmtMoney(totalCommission)}</td></tr>
+            ${totalAdvances > 0 ? '<tr style="border-bottom:1px solid #ddd;"><td style="padding:8px;">السُلف / Advances</td><td style="padding:8px; text-align:end; font-weight:700; color:#e74c3c;">- ' + fmtMoney(totalAdvances) + '</td></tr>' : ''}
+            ${totalDeductions > 0 ? '<tr style="border-bottom:1px solid #ddd;"><td style="padding:8px;">الخصومات / Deductions</td><td style="padding:8px; text-align:end; font-weight:700; color:#e74c3c;">- ' + fmtMoney(totalDeductions) + '</td></tr>' : ''}
+            <tr style="background:#c9a961;"><td style="padding:10px; font-weight:700; font-family:'Cinzel',serif; color:#000;">NET PAYMENT / الصافي</td><td style="padding:10px; text-align:end; font-weight:700; font-size:16px; color:#000;">${fmtMoney(net)}</td></tr>
+          </table>
+
+          <!-- Signatures -->
+          <table style="width:100%; border-collapse:collapse; margin-top:50px;">
+            <tr>
+              <td style="text-align:center; padding:20px; width:45%;">
+                <div style="min-height:80px; display:flex; align-items:center; justify-content:center;">
+                  ${(settings.signatureImage && settings.autoStampReceipts !== false) ? '<img src="' + settings.signatureImage + '" style="max-width:160px; max-height:80px; object-fit:contain;">' : ''}
+                </div>
+                <div style="border-top:1px solid #333; padding-top:8px;">
+                  <p style="font-size:12px; color:#555; margin:0;">المستلم / Received by</p>
+                  <p style="font-size:14px; font-weight:700; color:#000; margin:4px 0;">${escapeHtml(emp.name)}</p>
+                </div>
+              </td>
+              <td style="width:10%;"></td>
+              <td style="text-align:center; padding:20px; width:45%;">
+                <div style="min-height:80px; display:flex; align-items:center; justify-content:center;">
+                  ${(settings.stampImage && settings.autoStampReceipts !== false) ? '<img src="' + settings.stampImage + '" style="max-width:130px; max-height:90px; object-fit:contain;">' : ''}
+                </div>
+                <div style="border-top:1px solid #333; padding-top:8px;">
+                  <p style="font-size:12px; color:#555; margin:0;">المدير / Manager</p>
+                  <p style="font-size:14px; font-weight:700; color:#000; margin:4px 0;">Signature & Stamp</p>
+                </div>
+              </td>
+            </tr>
+          </table>
+
+          <!-- Footer -->
+          <p style="text-align:center; color:#999; font-size:9px; margin-top:20px; border-top:1px dashed #c9a961; padding-top:10px;">
+            Powered by Mezan ERP · © ${new Date().getFullYear()} Mansour Abdelnasser · All Rights Reserved
+          </p>
+        </div>
+      </div>
+      <div class="modal-footer no-print">
+        <button class="btn" onclick="this.closest('.modal-overlay').remove()">إغلاق</button>
+        <button class="btn" onclick="printReportDirect('commReceiptPrintArea')">🖨️ طباعة</button>
+        <button class="btn-primary btn" onclick="printElementAsPDF('commReceiptPrintArea', 'Commission-${emp.code}-${period}.pdf', false, {singlePage: false})">📄 PDF</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  // Record receipt & mark sales as paid
   DB.addReceipt({
     employeeId: empId,
     employeeName: emp.name,
     type: 'commission',
     period,
-    total: totalCommission - totalAdvances - totalDeductions,
+    total: net,
     commission: totalCommission,
     advances: totalAdvances,
     deductions: totalDeductions,
@@ -6046,11 +6174,173 @@ function generateCommissionReceipt(empId) {
     date: new Date().toISOString().split('T')[0]
   }).catch(err => console.error('Receipt save error:', err));
 
-  // Update each sale with commissionPaidDate
-  const today = new Date().toISOString().split('T')[0];
+  const todayStr = new Date().toISOString().split('T')[0];
   selectedSaleIds.forEach(id => {
-    DB.updateSale(id, { commissionPaidDate: today }).catch(() => {});
+    DB.updateSale(id, { commissionPaidDate: todayStr }).catch(() => {});
   });
+}
+
+
+
+// ==================== COMMISSION DASHBOARD ====================
+function openCommissionDashboard(empId) {
+  const emp = DB.getEmployees().find(e => e.id === empId);
+  if (!emp) return;
+  const sales = DB.getSales();
+  const receipts = DB.getReceipts().filter(r => r.employeeId === empId && r.type === 'commission');
+
+  // All commissions for this broker
+  const empSales = sales.filter(s =>
+    (s.brokerName === emp.name || s.salesName === emp.name) && Number(s.brokerCommissionDue || 0) > 0
+  );
+
+  const paidSaleIds = new Set();
+  receipts.forEach(r => {
+    if (Array.isArray(r.saleIds)) r.saleIds.forEach(id => paidSaleIds.add(id));
+  });
+
+  const paidSales = empSales.filter(s => paidSaleIds.has(s.id));
+  const unpaidSales = empSales.filter(s => !paidSaleIds.has(s.id));
+
+  const totalAll = empSales.reduce((s,sl) => s + Number(sl.brokerCommissionDue||0), 0);
+  const totalPaid = paidSales.reduce((s,sl) => s + Number(sl.brokerCommissionDue||0), 0);
+  const totalUnpaid = unpaidSales.reduce((s,sl) => s + Number(sl.brokerCommissionDue||0), 0);
+
+  const modal = document.createElement('div');
+  modal.className = 'modal-overlay';
+  modal.innerHTML = `
+    <div class="modal" style="max-width:900px;">
+      <div class="modal-header">
+        <h3 class="modal-title">📊 عمولات البروكر — ${escapeHtml(emp.name)}</h3>
+        <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
+      </div>
+      <div class="modal-body">
+        <!-- Stats -->
+        <div class="stats-grid" style="margin-bottom:20px;">
+          <div class="stat-card">
+            <div class="stat-label">إجمالي العمولات</div>
+            <div class="stat-value gold">${fmtMoney(totalAll)}</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">✅ المدفوع</div>
+            <div class="stat-value green">${fmtMoney(totalPaid)}</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">⏳ المتبقي</div>
+            <div class="stat-value red">${fmtMoney(totalUnpaid)}</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">عدد الصفقات</div>
+            <div class="stat-value">${empSales.length}</div>
+          </div>
+        </div>
+
+        <!-- Tabs -->
+        <div style="display:flex; gap:8px; margin-bottom:14px;">
+          <button class="btn btn-primary" onclick="showCommTab(this, 'unpaidTab')" id="tabUnpaid">⏳ متبقي (${unpaidSales.length})</button>
+          <button class="btn" onclick="showCommTab(this, 'paidTab')" id="tabPaid">✅ مدفوع (${paidSales.length})</button>
+          <button class="btn" onclick="showCommTab(this, 'receiptsTab')" id="tabReceipts">📄 الريسيتات (${receipts.length})</button>
+          <button class="btn" onclick="showCommTab(this, 'uploadTab')" id="tabUpload">📤 رفع ريسيت قديم</button>
+        </div>
+
+        <!-- Unpaid Tab -->
+        <div id="unpaidTab">
+          ${unpaidSales.length === 0 ? '<div class="empty-state" style="padding:20px;"><div class="empty-text">لا توجد عمولات متبقية 🎉</div></div>' : ''}
+          ${unpaidSales.length > 0 ? '<div class="table-wrap"><table><thead><tr><th>التاريخ</th><th>العميل</th><th>المشروع</th><th>الوحدة</th><th>النوع</th><th>العمولة</th></tr></thead><tbody>' +
+            unpaidSales.map(s => '<tr><td>' + fmtDate(s.date) + '</td><td>' + escapeHtml(s.clientName||'-') + '</td><td>' + escapeHtml(s.project||'-') + '</td><td>' + escapeHtml(s.unitNumber||s.building||'-') + '</td><td>' + escapeHtml(s.claimType||'-') + '</td><td class="text-gold">' + fmtMoney(s.brokerCommissionDue) + '</td></tr>').join('') +
+            '</tbody></table></div>' : ''}
+        </div>
+
+        <!-- Paid Tab -->
+        <div id="paidTab" style="display:none;">
+          ${paidSales.length === 0 ? '<div class="empty-state" style="padding:20px;"><div class="empty-text">لا توجد عمولات مدفوعة بعد</div></div>' : ''}
+          ${paidSales.length > 0 ? '<div class="table-wrap"><table><thead><tr><th>التاريخ</th><th>العميل</th><th>المشروع</th><th>الوحدة</th><th>النوع</th><th>العمولة</th><th>تاريخ الدفع</th></tr></thead><tbody>' +
+            paidSales.map(s => '<tr><td>' + fmtDate(s.date) + '</td><td>' + escapeHtml(s.clientName||'-') + '</td><td>' + escapeHtml(s.project||'-') + '</td><td>' + escapeHtml(s.unitNumber||s.building||'-') + '</td><td>' + escapeHtml(s.claimType||'-') + '</td><td class="text-gold">' + fmtMoney(s.brokerCommissionDue) + '</td><td>' + fmtDate(s.commissionPaidDate) + '</td></tr>').join('') +
+            '</tbody></table></div>' : ''}
+        </div>
+
+        <!-- Receipts History Tab -->
+        <div id="receiptsTab" style="display:none;">
+          ${receipts.length === 0 ? '<div class="empty-state" style="padding:20px;"><div class="empty-text">لا توجد ريسيتات سابقة</div></div>' : ''}
+          ${receipts.length > 0 ? '<div class="table-wrap"><table><thead><tr><th>التاريخ</th><th>الفترة</th><th>العمولات</th><th>السُلف</th><th>الخصومات</th><th>الصافي</th><th>النوع</th></tr></thead><tbody>' +
+            receipts.map(r => '<tr><td>' + fmtDate(r.date) + '</td><td>' + escapeHtml(r.period||'-') + '</td><td class="text-gold">' + fmtMoney(r.commission) + '</td><td style="color:#e74c3c;">' + fmtMoney(r.advances) + '</td><td style="color:#e74c3c;">' + fmtMoney(r.deductions) + '</td><td style="font-weight:700;">' + fmtMoney(r.total) + '</td><td>' + (r.uploadedFile ? '📎 ملف مرفق' : '🖨️ نظام') + '</td></tr>').join('') +
+            '</tbody></table></div>' : ''}
+        </div>
+
+        <!-- Upload Old Receipt Tab -->
+        <div id="uploadTab" style="display:none;">
+          <div style="padding:20px; background:var(--bg-card); border:1px dashed var(--gold); border-radius:12px; text-align:center;">
+            <div style="font-size:40px; margin-bottom:10px;">📤</div>
+            <h4 style="color:var(--gold); margin-bottom:10px;">رفع ريسيت عمولة قديم</h4>
+            <p style="color:var(--text-muted); font-size:13px; margin-bottom:16px;">ارفع صورة أو PDF لريسيت عمولة سابق لحفظه في سجلات البروكر</p>
+            <form id="uploadOldReceiptForm" onsubmit="uploadOldReceipt(event, '${empId}')">
+              <div class="form-grid">
+                <div class="input-group"><label>الفترة</label><input name="period" placeholder="يناير 2025" required></div>
+                <div class="input-group"><label>المبلغ</label><input type="number" step="0.01" name="amount" placeholder="5000" required></div>
+                <div class="input-group full"><label>ملاحظات</label><input name="notes" placeholder="ريسيت عمولة من الشركة السابقة"></div>
+                <div class="input-group full"><label>الملف (صورة / PDF)</label><input type="file" name="file" accept="image/*,.pdf" required></div>
+              </div>
+              <button type="submit" class="btn btn-primary" style="margin-top:14px; width:100%;">📤 رفع وحفظ</button>
+            </form>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="this.closest('.modal-overlay').remove()">إغلاق</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+}
+
+function showCommTab(btn, tabId) {
+  ['unpaidTab','paidTab','receiptsTab','uploadTab'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = id === tabId ? '' : 'none';
+  });
+  btn.parentElement.querySelectorAll('.btn').forEach(b => b.classList.remove('btn-primary'));
+  btn.classList.add('btn-primary');
+}
+
+async function uploadOldReceipt(e, empId) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const file = fd.get('file');
+  const period = fd.get('period');
+  const amount = Number(fd.get('amount'));
+  const notes = fd.get('notes');
+  const emp = DB.getEmployees().find(e2 => e2.id === empId);
+
+  if (!file || !period || !amount) { toast('املأ كل الحقول', 'error'); return; }
+
+  try {
+    // Convert file to Base64 for storage
+    const reader = new FileReader();
+    reader.onload = async function() {
+      const base64 = reader.result;
+      await DB.addReceipt({
+        employeeId: empId,
+        employeeName: emp?.name || '',
+        type: 'commission',
+        period,
+        total: amount,
+        commission: amount,
+        advances: 0,
+        deductions: 0,
+        saleIds: [],
+        uploadedFile: base64,
+        uploadedFileName: file.name,
+        notes,
+        date: new Date().toISOString().split('T')[0],
+        isUploaded: true
+      });
+      toast('✅ تم رفع الريسيت بنجاح');
+      document.querySelector('.modal-overlay')?.remove();
+    };
+    reader.readAsDataURL(file);
+  } catch (err) {
+    toast('خطأ: ' + err.message, 'error');
+  }
 }
 
 
